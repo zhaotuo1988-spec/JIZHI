@@ -515,9 +515,8 @@ const Recorder: React.FC = () => {
   };
 
   const TitleComponent = (
-    <div className="inline-flex items-center gap-1 relative px-2 py-0.5 rounded active:bg-gray-200/80 transition-colors cursor-pointer select-none">
-        <span>{log ? `${formatDateForDisplay(log.date)} 记录` : '现场记录'}</span>
-        {log && <input type="date" value={log.date} onChange={async (e) => {
+    log ? (
+        <input type="date" value={log.date} aria-label="修改日志日期" title="点击修改日志日期" onChange={async (e) => {
             if (!log) return;
             const val = e.target.value;
             setLog(prev => {
@@ -526,8 +525,10 @@ const Recorder: React.FC = () => {
                 safeSaveLog(updated);
                 return updated;
             });
-        }} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />}
-    </div>
+        }} className="h-9 rounded-lg border border-gray-200 bg-gray-50 px-3 text-[16px] font-normal text-gray-700 shadow-sm outline-none transition-colors focus:border-blue-400 focus:bg-white" />
+    ) : (
+        <span>现场记录</span>
+    )
   );
 
   const visibleLinkedRecords = log?.linkedRecords?.filter(link => {

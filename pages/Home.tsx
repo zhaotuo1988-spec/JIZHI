@@ -129,6 +129,22 @@ const NavListItem = ({ icon, title, onClick }: { icon: React.ReactNode, title: s
     </div>
 );
 
+interface LogMonthGroup {
+  monthKey: string;
+  logs: LogEntry[];
+}
+
+const getLogMonthKey = (date: string) => {
+  const match = date.match(/^\d{4}-\d{2}/);
+  return match ? match[0] : 'unknown';
+};
+
+const formatMonthTitle = (monthKey: string) => {
+  if (monthKey === 'unknown') return '未识别月份';
+  const [year, month] = monthKey.split('-');
+  return `${year}年${month}月`;
+};
+
 
 export default function Home() {
   const navigate = useNavigate();
@@ -152,6 +168,7 @@ export default function Home() {
   // Filter State
   const [selectedDate, setSelectedDate] = useState(''); // YYYY-MM-DD
   const [statusFilter, setStatusFilter] = useState<'all' | 'draft' | 'completed'>('all');
+  const [collapsedMonths, setCollapsedMonths] = useState<Set<string>>(new Set());
 
   const dateInputRef = useRef<HTMLInputElement>(null);
 
@@ -196,6 +213,30 @@ export default function Home() {
       return isDateMatch && isStatusMatch;
     });
   }, [logs, selectedDate, statusFilter]);
+
+  const monthGroups = useMemo<LogMonthGroup[]>(() => {
+    const groups = new Map<string, LogEntry[]>();
+    filteredLogs.forEach(log => {
+      const monthKey = getLogMonthKey(log.date);
+      const monthLogs = groups.get(monthKey) || [];
+      monthLogs.push(log);
+      groups.set(monthKey, monthLogs);
+    });
+
+    return Array.from(groups.entries()).map(([monthKey, monthLogs]) => ({
+      monthKey,
+      logs: monthLogs
+    }));
+  }, [filteredLogs]);
+
+  useEffect(() => {
+    if (selectedDate || monthGroups.length === 0) {
+      setCollapsedMonths(new Set());
+      return;
+    }
+
+    setCollapsedMonths(new Set(monthGroups.slice(1).map(group => group.monthKey)));
+  }, [selectedDate, monthGroups]);
 
   // --- Analysis Logic: Gap Detection & Duplicates ---
   const analysisResult = useMemo(() => {
@@ -369,6 +410,60 @@ export default function Home() {
     try { dateInputRef.current?.showPicker(); } catch (err) {}
   };
 
+  const toggleMonth = useCallback((monthKey: string) => {
+    if (isSelectionMode) return;
+
+    setCollapsedMonths(prev => {
+      const next = new Set(prev);
+      if (next.has(monthKey)) {
+        next.delete(monthKey);
+      } else {
+        next.add(monthKey);
+      }
+      return next;
+    });
+  }, [isSelectionMode]);
+
+  const renderLogCard = (log: LogEntry) => {
+    const isDup = analysisResult.duplicateSet.has(log.date);
+    const isSelected = selectedIds.has(log.id);
+
+    return (
+      <LongPressableItem
+        key={log.id}
+        id={log.id}
+        isSelectionMode={isSelectionMode}
+        isSelected={isSelected}
+        isDup={isDup}
+        onLongPress={handleLongPress}
+        onClick={handleItemClick}
+      >
+        {/* Left: Date Info */}
+        <div className="flex flex-col">
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-bold text-gray-800 tracking-tight font-mono leading-none mb-1">{log.date}</h3>
+            {isDup && <span className="text-[10px] bg-red-100 text-red-600 px-1.5 rounded font-medium border border-red-200 mb-1 pointer-events-none">重复</span>}
+          </div>
+          <p className="text-xs text-gray-400 font-medium">
+            {new Date(log.date).toLocaleDateString('zh-CN', { weekday: 'long' })}
+          </p>
+        </div>
+
+        {/* Right: Status Badge */}
+        <div className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 shrink-0 pointer-events-none ${
+          log.status === 'completed'
+            ? 'bg-green-50 text-green-700 border border-green-100'
+            : 'bg-amber-50 text-amber-700 border border-amber-100'
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${log.status === 'completed' ? 'bg-green-500' : 'bg-amber-500'}`}></span>
+          {log.status === 'completed' ? '已完成' : '草稿'}
+        </div>
+      </LongPressableItem>
+    );
+  };
+
+  const shouldUseMonthFolding = !isLoading && !selectedDate && filteredLogs.length > 0;
+
   // Determine Title based on Tab
   let pageTitle: React.ReactNode = project?.name || '日志列表';
   if (isSelectionMode) {
@@ -460,7 +555,7 @@ export default function Home() {
                 )}
 
                 {/* List Content */}
-                <div className="flex-1 overflow-y-auto p-4 no-scrollbar pb-[140px]">
+                <div className={`flex-1 overflow-y-auto no-scrollbar pb-[140px] ${shouldUseMonthFolding ? 'py-4 pl-1 pr-4' : 'p-4'}`}>
                     {isLoading ? (
                         <div className="flex items-center justify-center pt-20">
                             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
@@ -481,44 +576,67 @@ export default function Home() {
                             )}
                         </div>
                     </div>
+                    ) : selectedDate ? (
+                        filteredLogs.map(renderLogCard)
                     ) : (
-                        filteredLogs.map((log) => {
-                        const isDup = analysisResult.duplicateSet.has(log.date);
-                        const isSelected = selectedIds.has(log.id);
-                        
-                        return (
-                            <LongPressableItem
-                                key={log.id}
-                                id={log.id}
-                                isSelectionMode={isSelectionMode}
-                                isSelected={isSelected}
-                                isDup={isDup}
-                                onLongPress={handleLongPress}
-                                onClick={handleItemClick}
-                            >
-                                {/* Left: Date Info */}
-                                <div className="flex flex-col">
-                                    <div className="flex items-center gap-2">
-                                        <h3 className="text-lg font-bold text-gray-800 tracking-tight font-mono leading-none mb-1">{log.date}</h3>
-                                        {isDup && <span className="text-[10px] bg-red-100 text-red-600 px-1.5 rounded font-medium border border-red-200 mb-1 pointer-events-none">重复</span>}
-                                    </div>
-                                    <p className="text-xs text-gray-400 font-medium">
-                                        {new Date(log.date).toLocaleDateString('zh-CN', { weekday: 'long' })}
-                                    </p>
+                        <div className="flex items-start gap-3">
+                            <aside className={`sticky top-2 w-12 shrink-0 rounded-full bg-white/90 border border-gray-200 shadow-sm p-1 backdrop-blur ${isSelectionMode ? 'opacity-60' : ''}`}>
+                                <div className="flex flex-col gap-1">
+                                    {monthGroups.map(group => {
+                                        const isCollapsed = collapsedMonths.has(group.monthKey);
+                                        const isActive = !isCollapsed;
+                                        const monthText = group.monthKey === 'unknown' ? '--' : `${group.monthKey.slice(5)}月`;
+
+                                        return (
+                                            <button
+                                                key={group.monthKey}
+                                                type="button"
+                                                onClick={() => toggleMonth(group.monthKey)}
+                                                disabled={isSelectionMode}
+                                                className={`h-14 w-10 rounded-full flex flex-col items-center justify-center transition-all select-none
+                                                    ${isActive ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}
+                                                    ${isSelectionMode ? 'cursor-not-allowed' : 'active:scale-95'}
+                                                `}
+                                                title={`${formatMonthTitle(group.monthKey)} · ${group.logs.length}篇`}
+                                            >
+                                                <span className="text-[11px] font-bold leading-none">{monthText}</span>
+                                                <span className={`mt-1 text-[10px] leading-none ${isActive ? 'text-blue-100' : 'text-gray-400'}`}>{group.logs.length}</span>
+                                            </button>
+                                        );
+                                    })}
                                 </div>
-                                
-                                {/* Right: Status Badge */}
-                                <div className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 shrink-0 pointer-events-none ${
-                                    log.status === 'completed' 
-                                        ? 'bg-green-50 text-green-700 border border-green-100' 
-                                        : 'bg-amber-50 text-amber-700 border border-amber-100'
-                                }`}>
-                                    <span className={`w-1.5 h-1.5 rounded-full ${log.status === 'completed' ? 'bg-green-500' : 'bg-amber-500'}`}></span>
-                                    {log.status === 'completed' ? '已完成' : '草稿'}
-                                </div>
-                            </LongPressableItem>
-                        );
-                        })
+                            </aside>
+
+                            <div className="min-w-0 flex-1">
+                                {monthGroups.map(group => {
+                                    const isCollapsed = collapsedMonths.has(group.monthKey);
+
+                                    return (
+                                        <section key={group.monthKey} className="mb-3 last:mb-0">
+                                            <button
+                                                type="button"
+                                                onClick={() => toggleMonth(group.monthKey)}
+                                                disabled={isSelectionMode}
+                                                className={`mb-3 w-full rounded-xl border px-3 py-2 flex items-center justify-between text-left transition-all
+                                                    ${isCollapsed ? 'bg-white border-gray-100 text-gray-500' : 'bg-blue-50 border-blue-100 text-blue-700'}
+                                                    ${isSelectionMode ? 'opacity-70 cursor-not-allowed' : 'active:scale-[0.99]'}
+                                                `}
+                                            >
+                                                <div className="min-w-0">
+                                                    <div className="text-sm font-bold truncate">{formatMonthTitle(group.monthKey)} · {group.logs.length}篇</div>
+                                                    <div className="text-[11px] text-gray-400 mt-0.5">{isCollapsed ? '已折叠' : '已展开'}</div>
+                                                </div>
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-4 h-4 shrink-0 transition-transform ${isCollapsed ? '-rotate-90 text-gray-400' : 'rotate-0 text-blue-500'}`}>
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                                                </svg>
+                                            </button>
+
+                                            {!isCollapsed && group.logs.map(renderLogCard)}
+                                        </section>
+                                    );
+                                })}
+                            </div>
+                        </div>
                     )}
                 </div>
 

@@ -22,6 +22,7 @@ const Report: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [log, setLog] = useState<LogEntry | null>(null);
+  const [reportDate, setReportDate] = useState('');
   
   // Editable State for the 3 Categories
   const [engineeringText, setEngineeringText] = useState('');
@@ -46,6 +47,7 @@ const Report: React.FC = () => {
             const existing = await getLogById(id);
             if (existing) {
                 setLog(existing);
+                setReportDate(existing.date);
                 
                 // Populate text fields if report exists
                 if (existing.report) {
@@ -146,6 +148,7 @@ const Report: React.FC = () => {
 
     const updatedLog = {
         ...log,
+        date: reportDate || log.date,
         report: newReport,
         lastModified: Date.now()
     };
@@ -161,7 +164,8 @@ const Report: React.FC = () => {
     if (!log) return '';
 
     // Prepare Data
-    const dateObj = new Date(log.date);
+    const displayDate = reportDate || log.date;
+    const dateObj = new Date(displayDate);
     const dateData = {
         year: dateObj.getFullYear(),
         month: dateObj.getMonth() + 1,
@@ -188,7 +192,7 @@ const Report: React.FC = () => {
       <html lang="zh-CN">
       <head>
         <meta charset="utf-8">
-        <title>监理日志 - ${escapeHtml(log.date)}</title>
+        <title>监理日志 - ${escapeHtml(displayDate)}</title>
         <style>
           /* Global & Print Styles */
           @page { size: A4 portrait; margin: 20mm; }
@@ -365,7 +369,7 @@ const Report: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `监理日志_${log.date}.html`;
+    a.download = `监理日志_${reportDate || log.date}.html`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -459,8 +463,17 @@ const Report: React.FC = () => {
                 <div className="bg-white p-4 mb-4 border-b border-gray-200 shadow-sm">
                     <div className="flex flex-col gap-1">
                         <h2 className="text-xl font-bold text-gray-800 tracking-tight">监理日志</h2>
-                        <div className="flex items-center gap-4 text-sm text-gray-500 mt-1">
-                            <span>📅 {log.date}</span>
+                        <div className="flex flex-wrap items-center gap-3 text-sm text-gray-500 mt-1">
+                            <label className="flex items-center gap-2">
+                                <span>📅</span>
+                                <input
+                                    type="date"
+                                    value={reportDate}
+                                    onChange={(e) => setReportDate(e.target.value)}
+                                    className="rounded-md border border-gray-200 bg-gray-50 px-2 py-1 text-gray-700 outline-none focus:border-blue-400 focus:bg-white"
+                                    disabled={isSaving || isGenerating}
+                                />
+                            </label>
                             <span>☁️ {log.weather.split(' ')[0]}</span>
                         </div>
                          <div className="text-xs text-gray-400 mt-1 truncate">
