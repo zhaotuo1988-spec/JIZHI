@@ -1,0 +1,8 @@
+{
+  "name": "Copy of 智能监理日志-旁站功能版本",
+  "description": "基于AI对话的工程监理日报生成助手，支持语音、图片输入，自动润色专业术语。",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
