@@ -134,15 +134,36 @@ interface LogMonthGroup {
   logs: LogEntry[];
 }
 
+interface LogYearGroup {
+  yearKey: string;
+  logs: LogEntry[];
+  months: LogMonthGroup[];
+}
+
+const getLogYearKey = (date: string) => {
+  const match = date.match(/^\d{4}/);
+  return match ? match[0] : 'unknown';
+};
+
 const getLogMonthKey = (date: string) => {
   const match = date.match(/^\d{4}-\d{2}/);
   return match ? match[0] : 'unknown';
+};
+
+const formatYearTitle = (yearKey: string) => {
+  if (yearKey === 'unknown') return '未识别年份';
+  return `${yearKey}年`;
 };
 
 const formatMonthTitle = (monthKey: string) => {
   if (monthKey === 'unknown') return '未识别月份';
   const [year, month] = monthKey.split('-');
   return `${year}年${month}月`;
+};
+
+const formatMonthShortTitle = (monthKey: string) => {
+  if (monthKey === 'unknown') return '--';
+  return `${monthKey.slice(5)}月`;
 };
 
 
@@ -168,6 +189,7 @@ export default function Home() {
   // Filter State
   const [selectedDate, setSelectedDate] = useState(''); // YYYY-MM-DD
   const [statusFilter, setStatusFilter] = useState<'all' | 'draft' | 'completed'>('all');
+  const [collapsedYears, setCollapsedYears] = useState<Set<string>>(new Set());
   const [collapsedMonths, setCollapsedMonths] = useState<Set<string>>(new Set());
 
   const dateInputRef = useRef<HTMLInputElement>(null);
@@ -229,14 +251,36 @@ export default function Home() {
     }));
   }, [filteredLogs]);
 
+  const yearGroups = useMemo<LogYearGroup[]>(() => {
+    const groups = new Map<string, LogYearGroup>();
+
+    monthGroups.forEach(monthGroup => {
+      const firstLogDate = monthGroup.logs[0]?.date || '';
+      const yearKey = monthGroup.monthKey === 'unknown' ? getLogYearKey(firstLogDate) : monthGroup.monthKey.slice(0, 4);
+      const yearGroup = groups.get(yearKey) || { yearKey, logs: [], months: [] };
+
+      yearGroup.logs.push(...monthGroup.logs);
+      yearGroup.months.push(monthGroup);
+      groups.set(yearKey, yearGroup);
+    });
+
+    return Array.from(groups.values());
+  }, [monthGroups]);
+
   useEffect(() => {
-    if (selectedDate || monthGroups.length === 0) {
+    if (selectedDate || yearGroups.length === 0) {
+      setCollapsedYears(new Set());
       setCollapsedMonths(new Set());
       return;
     }
 
-    setCollapsedMonths(new Set(monthGroups.slice(1).map(group => group.monthKey)));
-  }, [selectedDate, monthGroups]);
+    setCollapsedYears(new Set(yearGroups.slice(1).map(group => group.yearKey)));
+    setCollapsedMonths(new Set(yearGroups.flatMap((yearGroup, yearIndex) => (
+      yearIndex === 0
+        ? yearGroup.months.slice(1).map(group => group.monthKey)
+        : yearGroup.months.map(group => group.monthKey)
+    ))));
+  }, [selectedDate, yearGroups]);
 
   // --- Analysis Logic: Gap Detection & Duplicates ---
   const analysisResult = useMemo(() => {
@@ -410,6 +454,20 @@ export default function Home() {
     try { dateInputRef.current?.showPicker(); } catch (err) {}
   };
 
+  const toggleYear = useCallback((yearKey: string) => {
+    if (isSelectionMode) return;
+
+    setCollapsedYears(prev => {
+      const next = new Set(prev);
+      if (next.has(yearKey)) {
+        next.delete(yearKey);
+      } else {
+        next.add(yearKey);
+      }
+      return next;
+    });
+  }, [isSelectionMode]);
+
   const toggleMonth = useCallback((monthKey: string) => {
     if (isSelectionMode) return;
 
@@ -580,28 +638,49 @@ export default function Home() {
                         filteredLogs.map(renderLogCard)
                     ) : (
                         <div className="flex items-start gap-3">
-                            <aside className={`sticky top-2 w-12 shrink-0 rounded-full bg-white/90 border border-gray-200 shadow-sm p-1 backdrop-blur ${isSelectionMode ? 'opacity-60' : ''}`}>
-                                <div className="flex flex-col gap-1">
-                                    {monthGroups.map(group => {
-                                        const isCollapsed = collapsedMonths.has(group.monthKey);
-                                        const isActive = !isCollapsed;
-                                        const monthText = group.monthKey === 'unknown' ? '--' : `${group.monthKey.slice(5)}月`;
+                            <aside className={`sticky top-2 w-16 shrink-0 rounded-2xl bg-white/90 border border-gray-200 shadow-sm p-1 backdrop-blur ${isSelectionMode ? 'opacity-60' : ''}`}>
+                                <div className="flex flex-col gap-2">
+                                    {yearGroups.map(yearGroup => {
+                                        const isYearCollapsed = collapsedYears.has(yearGroup.yearKey);
 
                                         return (
-                                            <button
-                                                key={group.monthKey}
-                                                type="button"
-                                                onClick={() => toggleMonth(group.monthKey)}
-                                                disabled={isSelectionMode}
-                                                className={`h-14 w-10 rounded-full flex flex-col items-center justify-center transition-all select-none
-                                                    ${isActive ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}
-                                                    ${isSelectionMode ? 'cursor-not-allowed' : 'active:scale-95'}
-                                                `}
-                                                title={`${formatMonthTitle(group.monthKey)} · ${group.logs.length}篇`}
-                                            >
-                                                <span className="text-[11px] font-bold leading-none">{monthText}</span>
-                                                <span className={`mt-1 text-[10px] leading-none ${isActive ? 'text-blue-100' : 'text-gray-400'}`}>{group.logs.length}</span>
-                                            </button>
+                                            <div key={yearGroup.yearKey} className="flex flex-col gap-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleYear(yearGroup.yearKey)}
+                                                    disabled={isSelectionMode}
+                                                    className={`h-10 w-full rounded-xl flex flex-col items-center justify-center transition-all select-none
+                                                        ${isYearCollapsed ? 'bg-gray-100 text-gray-500 hover:bg-gray-200' : 'bg-slate-800 text-white shadow-md shadow-slate-800/20'}
+                                                        ${isSelectionMode ? 'cursor-not-allowed' : 'active:scale-95'}
+                                                    `}
+                                                    title={`${formatYearTitle(yearGroup.yearKey)} · ${yearGroup.logs.length}篇`}
+                                                >
+                                                    <span className="text-[11px] font-bold leading-none">{yearGroup.yearKey === 'unknown' ? '--' : yearGroup.yearKey}</span>
+                                                    <span className={`mt-0.5 text-[10px] leading-none ${isYearCollapsed ? 'text-gray-400' : 'text-slate-200'}`}>{yearGroup.logs.length}</span>
+                                                </button>
+
+                                                {!isYearCollapsed && yearGroup.months.map(group => {
+                                                    const isCollapsed = collapsedMonths.has(group.monthKey);
+                                                    const isActive = !isCollapsed;
+
+                                                    return (
+                                                        <button
+                                                            key={group.monthKey}
+                                                            type="button"
+                                                            onClick={() => toggleMonth(group.monthKey)}
+                                                            disabled={isSelectionMode}
+                                                            className={`h-12 w-full rounded-xl flex flex-col items-center justify-center transition-all select-none
+                                                                ${isActive ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}
+                                                                ${isSelectionMode ? 'cursor-not-allowed' : 'active:scale-95'}
+                                                            `}
+                                                            title={`${formatMonthTitle(group.monthKey)} · ${group.logs.length}篇`}
+                                                        >
+                                                            <span className="text-[11px] font-bold leading-none">{formatMonthShortTitle(group.monthKey)}</span>
+                                                            <span className={`mt-0.5 text-[10px] leading-none ${isActive ? 'text-blue-100' : 'text-gray-400'}`}>{group.logs.length}</span>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
                                         );
                                     })}
                                 </div>
@@ -610,25 +689,34 @@ export default function Home() {
                             <div className="min-w-0 flex-1">
                                 {monthGroups.map(group => {
                                     const isCollapsed = collapsedMonths.has(group.monthKey);
+                                    const [yearText, monthText] = group.monthKey === 'unknown'
+                                      ? ['----', '--']
+                                      : group.monthKey.split('-');
 
                                     return (
-                                        <section key={group.monthKey} className="mb-3 last:mb-0">
+                                        <section key={group.monthKey} className="mb-4 last:mb-0">
                                             <button
                                                 type="button"
                                                 onClick={() => toggleMonth(group.monthKey)}
                                                 disabled={isSelectionMode}
-                                                className={`mb-3 w-full rounded-xl border px-3 py-2 flex items-center justify-between text-left transition-all
-                                                    ${isCollapsed ? 'bg-white border-gray-100 text-gray-500' : 'bg-blue-50 border-blue-100 text-blue-700'}
-                                                    ${isSelectionMode ? 'opacity-70 cursor-not-allowed' : 'active:scale-[0.99]'}
+                                                className={`mb-2 w-full border-l-4 border-y px-3 py-2 flex items-center justify-between text-left transition-all
+                                                    ${isCollapsed ? 'bg-white/70 border-l-gray-300 border-y-gray-100 text-gray-500' : 'bg-blue-50/80 border-l-blue-600 border-y-blue-100 text-slate-800'}
+                                                    ${isSelectionMode ? 'opacity-70 cursor-not-allowed' : 'active:bg-blue-100/70'}
                                                 `}
                                             >
-                                                <div className="min-w-0">
-                                                    <div className="text-sm font-bold truncate">{formatMonthTitle(group.monthKey)} · {group.logs.length}篇</div>
-                                                    <div className="text-[11px] text-gray-400 mt-0.5">{isCollapsed ? '已折叠' : '已展开'}</div>
+                                                <div className="min-w-0 flex items-center gap-2">
+                                                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-bold leading-none ${isCollapsed ? 'bg-gray-100 text-gray-500' : 'bg-blue-600 text-white'}`}>
+                                                        {yearText}
+                                                    </span>
+                                                    <span className="truncate text-sm font-bold">{group.monthKey === 'unknown' ? '未识别月份' : `${monthText}月`}</span>
+                                                    <span className={`text-[11px] font-semibold ${isCollapsed ? 'text-gray-400' : 'text-blue-600'}`}>{group.logs.length}篇</span>
                                                 </div>
-                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-4 h-4 shrink-0 transition-transform ${isCollapsed ? '-rotate-90 text-gray-400' : 'rotate-0 text-blue-500'}`}>
-                                                    <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-                                                </svg>
+                                                <div className="flex items-center gap-2 shrink-0">
+                                                    <span className="text-[11px] text-gray-400">{isCollapsed ? '已收起' : '已展开'}</span>
+                                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-4 h-4 transition-transform ${isCollapsed ? '-rotate-90 text-gray-400' : 'rotate-0 text-blue-500'}`}>
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                                                    </svg>
+                                                </div>
                                             </button>
 
                                             {!isCollapsed && group.logs.map(renderLogCard)}

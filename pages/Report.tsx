@@ -3,7 +3,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { LogEntry } from '../types';
-import { getLogById, saveLog } from '../services/storageService';
+import { getLogById, saveLog, isDevMode, supabase } from '../services/storageService';
 import { generateReportFromHistory } from '../services/geminiService';
 
 const escapeHtml = (value: string | number | null | undefined) => String(value ?? '').replace(/[&<>"']/g, (char) => {
@@ -362,14 +362,43 @@ const Report: React.FC = () => {
 
   // --- Export Actions ---
 
-  const handleDownload = () => {
+  const getExportAuthHeaders = async (): Promise<Record<string, string>> => {
+    if (isDevMode()) {
+      return { Authorization: 'Bearer dev-token' };
+    }
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  const handleDownload = async () => {
     if (!log) return;
-    const content = getPrintHtml();
-    const blob = new Blob([content], { type: 'text/html' });
+    const authHeaders = await getExportAuthHeaders();
+    const response = await fetch('/api/export/report-docx', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders
+      },
+      body: JSON.stringify({
+        date: reportDate || log.date,
+        weather: log.weather,
+        engineering: engineeringText,
+        supervisor: supervisorText,
+        safety: safetyText
+      })
+    });
+
+    if (!response.ok) {
+      alert('导出 Word 文件失败，请稍后重试。');
+      return;
+    }
+
+    const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `监理日志_${reportDate || log.date}.html`;
+    a.download = `监理日志_${reportDate || log.date}.docx`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

@@ -5,6 +5,8 @@ import fetch from 'node-fetch';
 import FormData from 'form-data';
 import OpenAI from 'openai'; 
 import path from 'path';
+import fs from 'fs';
+import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
@@ -486,6 +488,262 @@ app.post('/api/weather', verifyAuth, rateLimiter, async (req, res) => {
   } catch (error) {
     console.error("Weather Server Error:", error);
     res.json({ weatherStr: "天气：获取失败", locationStr: "", debug: error.message });
+  }
+});
+
+// --------------------------------------------------------
+// API Route: Export supervisor log as a real DOCX template
+// --------------------------------------------------------
+
+const DOCX_TEMPLATE_PATH = path.join(__dirname, 'templates', 'supervisor-log-template.docx');
+
+const crcTable = new Uint32Array(256);
+for (let n = 0; n < 256; n += 1) {
+  let c = n;
+  for (let k = 0; k < 8; k += 1) {
+    c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+  }
+  crcTable[n] = c >>> 0;
+}
+
+const crc32 = (buffer) => {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+const xmlEscape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&apos;'
+}[char]));
+
+const readDocxEntries = (buffer) => {
+  let eocdOffset = -1;
+  const minOffset = Math.max(0, buffer.length - 65558);
+  for (let i = buffer.length - 22; i >= minOffset; i -= 1) {
+    if (buffer.readUInt32LE(i) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) throw new Error('Invalid DOCX: missing ZIP directory');
+
+  const entryCount = buffer.readUInt16LE(eocdOffset + 10);
+  let offset = buffer.readUInt32LE(eocdOffset + 16);
+  const entries = [];
+
+  for (let i = 0; i < entryCount; i += 1) {
+    if (buffer.readUInt32LE(offset) !== 0x02014b50) {
+      throw new Error('Invalid DOCX: bad ZIP central directory');
+    }
+
+    const flags = buffer.readUInt16LE(offset + 8);
+    const method = buffer.readUInt16LE(offset + 10);
+    const compressedSize = buffer.readUInt32LE(offset + 20);
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const localOffset = buffer.readUInt32LE(offset + 42);
+    const nameBuffer = buffer.subarray(offset + 46, offset + 46 + nameLength);
+    const name = nameBuffer.toString((flags & 0x0800) ? 'utf8' : 'utf8');
+
+    const localNameLength = buffer.readUInt16LE(localOffset + 26);
+    const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = buffer.subarray(dataStart, dataStart + compressedSize);
+    let data;
+
+    if (method === 0) {
+      data = Buffer.from(compressed);
+    } else if (method === 8) {
+      data = zlib.inflateRawSync(compressed);
+    } else {
+      throw new Error(`Unsupported DOCX compression method: ${method}`);
+    }
+
+    entries.push({ name, data });
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+
+  return entries;
+};
+
+const buildDocxBuffer = (entries) => {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBuffer = Buffer.from(entry.name, 'utf8');
+    const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data);
+    const crc = crc32(data);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(data.length, 18);
+    localHeader.writeUInt32LE(data.length, 22);
+    localHeader.writeUInt16LE(nameBuffer.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+
+    localParts.push(localHeader, nameBuffer, data);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(data.length, 20);
+    centralHeader.writeUInt32LE(data.length, 24);
+    centralHeader.writeUInt16LE(nameBuffer.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+
+    centralParts.push(centralHeader, nameBuffer);
+    offset += localHeader.length + nameBuffer.length + data.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralParts);
+  const centralOffset = offset;
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(centralOffset, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, centralDirectory, end]);
+};
+
+const paragraphXml = (text, options = {}) => {
+  const font = options.font || '楷体_GB2312';
+  const size = options.size || 21;
+  const align = options.align || 'both';
+  const preservedText = xmlEscape(text);
+  const space = /^\s|\s$|\s{2,}/.test(String(text ?? '')) ? ' xml:space="preserve"' : '';
+
+  return `<w:p><w:pPr><w:snapToGrid w:val="0"/><w:jc w:val="${align}"/><w:rPr><w:rFonts w:hint="eastAsia" w:ascii="${font}" w:hAnsi="${font}" w:eastAsia="${font}" w:cs="${font}"/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:hint="eastAsia" w:ascii="${font}" w:hAnsi="${font}" w:eastAsia="${font}" w:cs="${font}"/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr><w:t${space}>${preservedText}</w:t></w:r></w:p>`;
+};
+
+const sectionParagraphsXml = (title, text) => {
+  const lines = String(text || '无特殊情况。')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  return [
+    paragraphXml(title, { font: '宋体', align: 'both' }),
+    ...lines.map(line => paragraphXml(line, { font: '楷体_GB2312', align: 'both' }))
+  ].join('');
+};
+
+const replaceCellParagraphs = (cellXml, paragraphsXml) => {
+  const tcPrMatch = cellXml.match(/<w:tcPr>[\s\S]*?<\/w:tcPr>/);
+  return `<w:tc>${tcPrMatch ? tcPrMatch[0] : ''}${paragraphsXml}</w:tc>`;
+};
+
+const replaceCellAt = (rowXml, cellIndex, paragraphsXml) => {
+  const cells = rowXml.match(/<w:tc\b[\s\S]*?<\/w:tc>/g) || [];
+  if (!cells[cellIndex]) return rowXml;
+  return rowXml.replace(cells[cellIndex], replaceCellParagraphs(cells[cellIndex], paragraphsXml));
+};
+
+const formatReportDate = (dateValue) => {
+  const date = dateValue ? new Date(`${dateValue}T00:00:00`) : new Date();
+  if (Number.isNaN(date.getTime())) return String(dateValue || '');
+  return `${date.getFullYear()} 年 ${date.getMonth() + 1} 月 ${date.getDate()} 日      ${date.toLocaleDateString('zh-CN', { weekday: 'long' })}`;
+};
+
+const parseWeather = (weather) => {
+  const text = String(weather || '');
+  const matchValue = (patterns) => {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match?.[1]) return match[1].trim();
+    }
+    return '';
+  };
+
+  return {
+    condition: matchValue([/天气[:：]\s*([^\s]+)/, /weather[:：]\s*([^\s]+)/i]) || text,
+    temperature: matchValue([/(?:气温|实时气温)[:：]\s*([^\s]+)/]),
+    windDirection: matchValue([/风向[:：]\s*([^\s]+)/]),
+    windPower: matchValue([/风力[:：]\s*([^\s]+)/])
+  };
+};
+
+const fillSupervisorLogDocx = (payload) => {
+  if (!fs.existsSync(DOCX_TEMPLATE_PATH)) throw new Error('DOCX template not found');
+
+  const entries = readDocxEntries(fs.readFileSync(DOCX_TEMPLATE_PATH));
+  const documentEntry = entries.find(entry => entry.name === 'word/document.xml');
+  if (!documentEntry) throw new Error('DOCX template missing word/document.xml');
+
+  const weather = parseWeather(payload.weather);
+  const weatherText = `天气：${weather.condition || ' '}     气温：${weather.temperature || ' '}      风向：${weather.windDirection || ' '}          风力：${weather.windPower || ' '}`;
+
+  const xml = documentEntry.data.toString('utf8');
+  const tableMatch = xml.match(/<w:tbl\b[\s\S]*?<\/w:tbl>/);
+  if (!tableMatch) throw new Error('DOCX template table not found');
+
+  const tableXml = tableMatch[0];
+  const rows = tableXml.match(/<w:tr\b[\s\S]*?<\/w:tr>/g) || [];
+  if (rows.length < 5) throw new Error('DOCX template table has unexpected structure');
+
+  const nextRows = [...rows];
+  nextRows[0] = replaceCellAt(rows[0], 1, paragraphXml(formatReportDate(payload.date), { font: '楷体_GB2312', align: 'left' }));
+  nextRows[1] = replaceCellAt(rows[1], 1, paragraphXml(weatherText, { font: '楷体_GB2312', align: 'left' }));
+  nextRows[2] = replaceCellAt(rows[2], 0, sectionParagraphsXml('工程动态：', payload.engineering));
+  nextRows[3] = replaceCellAt(rows[3], 0, sectionParagraphsXml('监理工作情况：', payload.supervisor));
+  nextRows[4] = replaceCellAt(rows[4], 0, sectionParagraphsXml('安全监理工作情况：', payload.safety));
+
+  let nextTableXml = tableXml;
+  rows.forEach((row, index) => {
+    nextTableXml = nextTableXml.replace(row, nextRows[index]);
+  });
+
+  const nextDocumentXml = xml.replace(tableXml, nextTableXml);
+  const nextEntries = entries.map(entry => (
+    entry.name === 'word/document.xml'
+      ? { ...entry, data: Buffer.from(nextDocumentXml, 'utf8') }
+      : entry
+  ));
+
+  return buildDocxBuffer(nextEntries);
+};
+
+app.post('/api/export/report-docx', verifyAuth, (req, res) => {
+  try {
+    const docxBuffer = fillSupervisorLogDocx(req.body || {});
+    const filename = `监理日志_${req.body?.date || new Date().toISOString().slice(0, 10)}.docx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(docxBuffer);
+  } catch (error) {
+    console.error('DOCX export error:', error);
+    res.status(500).json({ error: error.message || 'Failed to export DOCX' });
   }
 });
 
