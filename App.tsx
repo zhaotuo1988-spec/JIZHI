@@ -1,38 +1,62 @@
 
-import React, { useEffect } from 'react';
-import { HashRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import React from 'react';
+import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Home from './pages/Home';
 import Recorder from './pages/Recorder';
 import Report from './pages/Report';
 import Login from './pages/Login';
 import ProjectList from './pages/ProjectList';
+import AdminUsers from './pages/AdminUsers';
 import ConcreteList from './pages/ConcreteList';
 import ConcreteForm from './pages/ConcreteForm';
 import ConcreteReport from './pages/ConcreteReport';
-import { getUser } from './services/storageService';
+import { AuthProvider, useAuth } from './services/authContext';
+
+const RouteLoader: React.FC = () => (
+  <div className="min-h-screen flex items-center justify-center bg-slate-50">
+    <div className="w-9 h-9 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
+  </div>
+);
 
 // Auth Guard Component
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const user = getUser();
+  const { user, loading } = useAuth();
+  if (loading) return <RouteLoader />;
   if (!user || !user.isLoggedIn) {
     return <Navigate to="/login" replace />;
   }
   return <>{children}</>;
 };
 
+const AdminRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user, loading, isAdmin } = useAuth();
+  if (loading) return <RouteLoader />;
+  if (!user || !user.isLoggedIn) return <Navigate to="/login" replace />;
+  if (!isAdmin) return <Navigate to="/projects" replace />;
+  return <>{children}</>;
+};
+
 const App: React.FC = () => {
   return (
-    <HashRouter>
-      <Routes>
-        {/* Login Page */}
-        <Route path="/login" element={<Login />} />
+    <AuthProvider>
+      <HashRouter>
+        <Routes>
+          {/* Login Page */}
+          <Route path="/login" element={<Login />} />
 
-        {/* Project Selection (Home for logged in users) */}
-        <Route path="/projects" element={
-            <ProtectedRoute>
-                <ProjectList />
-            </ProtectedRoute>
-        } />
+          {/* Admin Account Management */}
+          <Route path="/admin/users" element={
+              <AdminRoute>
+                  <AdminUsers />
+              </AdminRoute>
+          } />
+
+          {/* Project Selection (Home for logged in users) */}
+          <Route path="/projects" element={
+              <ProtectedRoute>
+                  <ProjectList />
+              </ProtectedRoute>
+          } />
         
         {/* Project Log List */}
         <Route path="/project/:projectId/logs" element={
@@ -76,13 +100,14 @@ const App: React.FC = () => {
             </ProtectedRoute>
         } />
         
-        {/* Default Redirect - Modified to point to Login first */}
-        <Route path="/" element={<Navigate to="/login" replace />} />
-        
-        {/* Fallback */}
-        <Route path="*" element={<Navigate to="/login" replace />} />
-      </Routes>
-    </HashRouter>
+          {/* Default Redirect - Modified to point to Login first */}
+          <Route path="/" element={<Navigate to="/login" replace />} />
+          
+          {/* Fallback */}
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </Routes>
+      </HashRouter>
+    </AuthProvider>
   );
 };
 

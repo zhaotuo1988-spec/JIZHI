@@ -60,8 +60,21 @@ export interface Project {
 }
 
 export interface User {
+  id?: string;
   username: string;
+  email?: string;
+  displayName?: string;
+  role?: 'admin' | 'user';
+  status?: 'active' | 'inactive';
   isLoggedIn: boolean;
+}
+
+export interface UserProfile {
+  userId: string;
+  email: string;
+  displayName?: string;
+  role: 'admin' | 'user';
+  status: 'active' | 'inactive';
 }
 
 export interface WeatherInfo {

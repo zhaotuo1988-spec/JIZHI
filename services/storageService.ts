@@ -1,6 +1,6 @@
 
 import { createClient } from '@supabase/supabase-js';
-import { LogEntry, Project, User, ConcreteRecord } from '../types';
+import { LogEntry, Project, ConcreteRecord } from '../types';
 
 // ============================================================================
 // CONFIG & DEV MODE SWITCH
@@ -49,39 +49,6 @@ const mockDelay = (ms = 300) => new Promise(resolve => setTimeout(resolve, ms));
 // USER AUTH
 // ============================================================================
 
-export const getUser = (): User | null => {
-  // 1. Check Dev Mode User
-  if (isDevMode()) {
-      const devUser = localStorage.getItem('dev_user');
-      if (devUser) {
-          return JSON.parse(devUser);
-      }
-      return null;
-  }
-
-  // 2. Check Supabase User
-  try {
-      let hostname = 'memfiredb';
-      try {
-        hostname = new URL(MEMFIRE_URL).hostname.split('.')[0];
-      } catch(e) {}
-      
-      const keyPattern = `sb-${hostname}-auth-token`;
-      const session = localStorage.getItem(keyPattern);
-      
-      if (session) {
-          const parsed = JSON.parse(session);
-          if (parsed.user) {
-              return {
-                  username: parsed.user.email || 'User',
-                  isLoggedIn: true
-              };
-          }
-      }
-  } catch(e) {}
-  return null;
-};
-
 export const registerUser = async (email: string, password: string): Promise<void> => {
     if (isDevMode()) {
         throw new Error("开发者模式下不支持注册，请直接点击“进入系统”");
@@ -89,11 +56,7 @@ export const registerUser = async (email: string, password: string): Promise<voi
     if (!isCloudConfigured()) {
         throw new Error("尚未配置云端数据库，无法注册账号。请先使用“开发者免密进入（本地数据模式）”试用，或在 .env 中配置 VITE_MEMFIRE_URL 和 VITE_MEMFIRE_ANON_KEY 后重新构建。");
     }
-    const { error } = await supabase.auth.signUp({
-        email,
-        password
-    });
-    if (error) throw error;
+    throw new Error("Public registration is disabled. Ask an administrator to create the account.");
 };
 
 export const loginUser = async (email: string, password: string): Promise<void> => {

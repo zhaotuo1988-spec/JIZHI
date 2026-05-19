@@ -3,7 +3,8 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { Project, User } from '../types';
-import { getProjects, saveProject, updateProject, logoutUser, getUser, deleteProjects, getLogs, getConcreteRecords } from '../services/storageService';
+import { getProjects, saveProject, updateProject, logoutUser, deleteProjects, getLogs, getConcreteRecords } from '../services/storageService';
+import { useAuth } from '../services/authContext';
 
 // --- Internal Component: Long Pressable Item (Projects) ---
 interface LongPressableItemProps {
@@ -136,6 +137,7 @@ const MenuItem = ({ icon, label, onClick, isDestructive = false }: { icon: React
 
 const ProjectList: React.FC = () => {
   const navigate = useNavigate();
+  const { user: authUser, isAdmin, refreshUser } = useAuth();
   const [activeTab, setActiveTab] = useState<'projects' | 'profile'>('projects');
   
   const [projects, setProjects] = useState<Project[]>([]);
@@ -163,14 +165,13 @@ const ProjectList: React.FC = () => {
 
   // Initialize
   useEffect(() => {
-    const currentUser = getUser();
-    if (!currentUser) {
+    if (!authUser) {
         navigate('/login');
         return;
     }
-    setUser(currentUser);
+    setUser(authUser);
     loadData();
-  }, [navigate]);
+  }, [authUser, navigate]);
 
   const loadData = async () => {
       setIsLoading(true);
@@ -257,6 +258,7 @@ const ProjectList: React.FC = () => {
         setIsLoggingOut(true);
         try {
             await logoutUser();
+            await refreshUser();
         } catch (error) {
             console.error("Logout error:", error);
             // Only clear auth keys; project/log drafts may be local-only in developer mode.
@@ -405,6 +407,23 @@ const ProjectList: React.FC = () => {
                   />
               </div>
           </div>
+
+          {isAdmin && (
+              <div className="px-4 pb-2">
+                  <button
+                      onClick={() => navigate('/admin/users')}
+                      className="w-full bg-slate-900 text-white rounded-xl px-5 py-4 shadow-sm flex items-center justify-between active:scale-[0.99] transition-transform"
+                  >
+                      <div className="text-left">
+                          <p className="text-base font-bold">账号管理</p>
+                          <p className="text-xs text-slate-300 mt-0.5">创建账号、停用用户、重置密码</p>
+                      </div>
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                      </svg>
+                  </button>
+              </div>
+          )}
 
           {/* 3. Menu List */}
           <div className="px-4 py-2">

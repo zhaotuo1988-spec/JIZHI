@@ -32,6 +32,7 @@ app.set('trust proxy', 1);
 // 初始化 Supabase 客户端
 const SUPABASE_URL = process.env.MEMFIRE_URL || process.env.VITE_MEMFIRE_URL;
 const SUPABASE_ANON_KEY = process.env.MEMFIRE_ANON_KEY || process.env.VITE_MEMFIRE_ANON_KEY;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.MEMFIRE_SERVICE_ROLE_KEY;
 
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_ANON_KEY) {
@@ -43,6 +44,23 @@ if (SUPABASE_URL && SUPABASE_ANON_KEY) {
     }
 } else {
     console.warn("⚠️ Warning: MEMFIRE_URL/KEY not found in env. Auth middleware might fail unless using Dev Mode.");
+}
+
+let supabaseAdmin = null;
+if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    try {
+        supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+            auth: {
+                autoRefreshToken: false,
+                persistSession: false
+            }
+        });
+        console.log("Supabase/MemFire Admin Client Initialized on Backend");
+    } catch (e) {
+        console.warn("Failed to initialize Supabase admin client:", e.message);
+    }
+} else {
+    console.warn("SUPABASE_SERVICE_ROLE_KEY not found. Admin account APIs will be unavailable outside Dev Mode.");
 }
 
 // --------------------------------------------------------
@@ -82,6 +100,50 @@ const rateLimiter = (req, res, next) => {
 };
 
 
+const getProfileByUserId = async (userId) => {
+    const client = supabaseAdmin || supabase;
+    if (!client) return null;
+
+    const { data, error } = await client
+        .from('profiles')
+        .select('user_id,email,display_name,role,status')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (error) {
+        console.warn("Profile lookup failed:", error.message);
+        return null;
+    }
+
+    return data;
+};
+
+const requireAdmin = async (req, res, next) => {
+    if (req.isDevUser) {
+        return next();
+    }
+
+    const profile = req.profile || await getProfileByUserId(req.user?.id);
+    if (!profile || profile.role !== 'admin' || profile.status !== 'active') {
+        return res.status(403).json({ error: "Admin access required" });
+    }
+
+    req.profile = profile;
+    next();
+};
+
+const requireAdminClient = (req, res, next) => {
+    if (req.isDevUser && !supabaseAdmin) {
+        return next();
+    }
+
+    if (!supabaseAdmin) {
+        return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY is not configured" });
+    }
+
+    next();
+};
+
 // --------------------------------------------------------
 // Middleware: Verify Auth Token
 // --------------------------------------------------------
@@ -118,7 +180,13 @@ const verifyAuth = async (req, res, next) => {
             return res.status(401).json({ error: "Invalid or Expired Token" });
         }
 
+        const profile = await getProfileByUserId(user.id);
+        if (profile?.status === 'inactive') {
+            return res.status(403).json({ error: "Account is disabled" });
+        }
+
         req.user = user;
+        req.profile = profile;
         next();
 
     } catch (err) {
@@ -130,6 +198,229 @@ const verifyAuth = async (req, res, next) => {
 
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: bodyLimit }));
+
+// --------------------------------------------------------
+// Admin Account Routes
+// --------------------------------------------------------
+const roleOrDefault = (role) => role === 'admin' ? 'admin' : 'user';
+const statusOrDefault = (status) => status === 'inactive' ? 'inactive' : 'active';
+
+const countByOwner = async (tableName) => {
+    if (!supabaseAdmin) return new Map();
+
+    const { data, error } = await supabaseAdmin
+        .from(tableName)
+        .select('owner_id');
+
+    if (error) {
+        console.warn(`Failed to count ${tableName}:`, error.message);
+        return new Map();
+    }
+
+    const counts = new Map();
+    (data || []).forEach(row => {
+        counts.set(row.owner_id, (counts.get(row.owner_id) || 0) + 1);
+    });
+    return counts;
+};
+
+const buildManagedUsers = async () => {
+    const [{ data: authData, error: authError }, profilesResult, projectCounts, logCounts, concreteCounts] = await Promise.all([
+        supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 }),
+        supabaseAdmin.from('profiles').select('user_id,email,display_name,role,status,created_at'),
+        countByOwner('projects'),
+        countByOwner('logs'),
+        countByOwner('concrete_records')
+    ]);
+
+    if (authError) throw authError;
+    if (profilesResult.error) throw profilesResult.error;
+
+    const profileMap = new Map((profilesResult.data || []).map(profile => [profile.user_id, profile]));
+
+    return (authData?.users || []).map(user => {
+        const profile = profileMap.get(user.id);
+        const email = profile?.email || user.email || '';
+        const displayName = profile?.display_name || user.user_metadata?.display_name || email;
+        return {
+            id: user.id,
+            email,
+            displayName,
+            role: roleOrDefault(profile?.role),
+            status: statusOrDefault(profile?.status),
+            createdAt: profile?.created_at || user.created_at,
+            lastSignInAt: user.last_sign_in_at || null,
+            stats: {
+                projects: projectCounts.get(user.id) || 0,
+                logs: logCounts.get(user.id) || 0,
+                concreteRecords: concreteCounts.get(user.id) || 0
+            }
+        };
+    }).sort((a, b) => {
+        if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
+        return (b.createdAt || '').localeCompare(a.createdAt || '');
+    });
+};
+
+const getManagedUserById = async (userId) => {
+    const users = await buildManagedUsers();
+    return users.find(user => user.id === userId);
+};
+
+const upsertProfile = async ({ userId, email, displayName, role, status, createdBy }) => {
+    const payload = {
+        user_id: userId,
+        email,
+        display_name: displayName || email,
+        role: roleOrDefault(role),
+        status: statusOrDefault(status),
+        updated_at: new Date().toISOString()
+    };
+
+    if (createdBy) payload.created_by = createdBy;
+
+    const { error } = await supabaseAdmin
+        .from('profiles')
+        .upsert(payload, { onConflict: 'user_id' });
+
+    if (error) throw error;
+};
+
+app.get('/api/admin/users', verifyAuth, requireAdmin, requireAdminClient, async (req, res) => {
+    try {
+        if (req.isDevUser && !supabaseAdmin) {
+            return res.json({
+                users: [{
+                    id: 'dev-user-id',
+                    email: 'dev@local.host',
+                    displayName: 'Developer Admin',
+                    role: 'admin',
+                    status: 'active',
+                    createdAt: new Date().toISOString(),
+                    lastSignInAt: null,
+                    stats: { projects: 0, logs: 0, concreteRecords: 0 }
+                }]
+            });
+        }
+
+        res.json({ users: await buildManagedUsers() });
+    } catch (error) {
+        console.error("Admin list users error:", error);
+        res.status(500).json({ error: error.message || "Failed to list users" });
+    }
+});
+
+app.post('/api/admin/users', verifyAuth, requireAdmin, requireAdminClient, async (req, res) => {
+    try {
+        if (req.isDevUser && !supabaseAdmin) {
+            return res.status(503).json({ error: "Configure SUPABASE_SERVICE_ROLE_KEY to create real cloud users" });
+        }
+
+        const email = String(req.body?.email || '').trim().toLowerCase();
+        const password = String(req.body?.password || '');
+        const displayName = String(req.body?.displayName || '').trim();
+        const role = roleOrDefault(req.body?.role);
+
+        if (!email || !email.includes('@')) {
+            return res.status(400).json({ error: "Valid email is required" });
+        }
+        if (password.length < 6) {
+            return res.status(400).json({ error: "Password must be at least 6 characters" });
+        }
+
+        const { data, error } = await supabaseAdmin.auth.admin.createUser({
+            email,
+            password,
+            email_confirm: true,
+            user_metadata: { display_name: displayName || email }
+        });
+
+        if (error) throw error;
+        const createdUser = data.user;
+        if (!createdUser) throw new Error("Supabase did not return the created user");
+
+        await upsertProfile({
+            userId: createdUser.id,
+            email,
+            displayName: displayName || email,
+            role,
+            status: 'active',
+            createdBy: req.user.id
+        });
+
+        res.status(201).json({ user: await getManagedUserById(createdUser.id) });
+    } catch (error) {
+        console.error("Admin create user error:", error);
+        res.status(500).json({ error: error.message || "Failed to create user" });
+    }
+});
+
+app.patch('/api/admin/users/:id', verifyAuth, requireAdmin, requireAdminClient, async (req, res) => {
+    try {
+        if (req.isDevUser && !supabaseAdmin) {
+            return res.status(503).json({ error: "Configure SUPABASE_SERVICE_ROLE_KEY to update real cloud users" });
+        }
+
+        const userId = req.params.id;
+        const existing = await getManagedUserById(userId);
+        if (!existing) return res.status(404).json({ error: "User not found" });
+
+        const nextRole = req.body?.role ? roleOrDefault(req.body.role) : existing.role;
+        const nextStatus = req.body?.status ? statusOrDefault(req.body.status) : existing.status;
+        const nextDisplayName = typeof req.body?.displayName === 'string'
+            ? req.body.displayName.trim()
+            : existing.displayName;
+
+        if (userId === req.user.id && (nextRole !== 'admin' || nextStatus !== 'active')) {
+            return res.status(400).json({ error: "You cannot demote or disable the current admin account" });
+        }
+
+        const authUpdates = {
+            user_metadata: { display_name: nextDisplayName || existing.email }
+        };
+        if (nextStatus !== existing.status) {
+            authUpdates.ban_duration = nextStatus === 'inactive' ? '876000h' : 'none';
+        }
+
+        const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(userId, authUpdates);
+        if (authError) throw authError;
+
+        await upsertProfile({
+            userId,
+            email: existing.email,
+            displayName: nextDisplayName || existing.email,
+            role: nextRole,
+            status: nextStatus
+        });
+
+        res.json({ user: await getManagedUserById(userId) });
+    } catch (error) {
+        console.error("Admin update user error:", error);
+        res.status(500).json({ error: error.message || "Failed to update user" });
+    }
+});
+
+app.post('/api/admin/users/:id/reset-password', verifyAuth, requireAdmin, requireAdminClient, async (req, res) => {
+    try {
+        if (req.isDevUser && !supabaseAdmin) {
+            return res.status(503).json({ error: "Configure SUPABASE_SERVICE_ROLE_KEY to reset real cloud users" });
+        }
+
+        const userId = req.params.id;
+        const newPassword = String(req.body?.newPassword || '');
+        if (newPassword.length < 6) {
+            return res.status(400).json({ error: "Password must be at least 6 characters" });
+        }
+
+        const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, { password: newPassword });
+        if (error) throw error;
+
+        res.json({ ok: true });
+    } catch (error) {
+        console.error("Admin reset password error:", error);
+        res.status(500).json({ error: error.message || "Failed to reset password" });
+    }
+});
 
 // --------------------------------------------------------
 // API Routes
